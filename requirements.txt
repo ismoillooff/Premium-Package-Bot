@@ -1,2 +1,6 @@
 aiogram==3.31.0
 python-dotenv==1.2.3
+
+# testlar
+pytest==9.1.1
+pytest-asyncio==1.4.0

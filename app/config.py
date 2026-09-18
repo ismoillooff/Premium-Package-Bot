@@ -20,10 +20,11 @@ class ConfigError(RuntimeError):
 class Settings:
     bot_token: str
     log_level: str = "INFO"
-    set_cache_ttl: int = 600
+    cache_ttl: int = 600
+    admin_id: int | None = None
 
     def __repr__(self) -> str:  # token hech qachon repr/log orqali chiqmasin
-        return f"Settings(bot_token='***', log_level={self.log_level!r}, set_cache_ttl={self.set_cache_ttl})"
+        return f"Settings(bot_token='***', log_level={self.log_level!r}, cache_ttl={self.cache_ttl}, admin_id={self.admin_id})"
 
 
 def load_settings() -> Settings:
@@ -40,10 +41,17 @@ def load_settings() -> Settings:
         log_level = "INFO"
 
     try:
-        ttl = int(os.getenv("SET_CACHE_TTL", "600"))
+        # SET_CACHE_TTL — eski nom, moslik uchun qo'llanadi.
+        ttl = int(os.getenv("CACHE_TTL_SECONDS") or os.getenv("SET_CACHE_TTL") or "600")
     except ValueError:
-        raise ConfigError("SET_CACHE_TTL butun son bo'lishi kerak") from None
+        raise ConfigError("CACHE_TTL_SECONDS butun son bo'lishi kerak") from None
     if ttl < 0:
-        raise ConfigError("SET_CACHE_TTL manfiy bo'lishi mumkin emas")
+        raise ConfigError("CACHE_TTL_SECONDS manfiy bo'lishi mumkin emas")
 
-    return Settings(bot_token=token, log_level=log_level, set_cache_ttl=ttl)
+    admin_raw = os.getenv("ADMIN_ID", "").strip()
+    if admin_raw and not admin_raw.isdigit():
+        raise ConfigError("ADMIN_ID musbat butun son bo'lishi kerak")
+
+    return Settings(
+        bot_token=token, log_level=log_level, cache_ttl=ttl, admin_id=int(admin_raw) if admin_raw else None
+    )

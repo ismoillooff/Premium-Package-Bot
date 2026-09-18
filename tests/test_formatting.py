@@ -1,30 +1,20 @@
 import re
-import unittest
 
-from app.services.emoji_service import EmojiInfo, EmojiPack, LookupResult
-from app.utils.formatting import (
-    MESSAGE_LIMIT,
-    chunk_lines,
-    copy_payload,
-    emoji_line,
-    format_ids_messages,
-    format_pack_messages,
-    format_summary,
-    utf16_len,
-)
+from app.models.emoji import EmojiItem, EmojiPack
+from app.premium_emojis import PremiumEmojiRegistry
+from app.services.code_generator_service import CodeGeneratorService, CodeLanguage
+from app.services.session_service import Session
+from app.utils.formatting import content_emoji, premium_emoji, utf16_len
+from app.utils.pagination import get_page
+from app.utils.telegram_limits import MESSAGE_TEXT_MAX_CHARS
+from app.views import Views
 
-
-def pack(n: int, name: str = "Big", title: str = "Big Pack") -> EmojiPack:
-    return EmojiPack(
-        name=name,
-        title=title,
-        emojis=tuple(EmojiInfo(str(5368324170671200000 + i), "🔥", name) for i in range(n)),
-    )
+EVIL = '<b>x</b> & <script>"'
 
 
 def tags_balanced(html: str) -> bool:
     stack: list[str] = []
-    for closing, tag in re.findall(r"<(/?)(\w+)[^>]*>", html):
+    for closing, tag in re.findall(r"<(/?)([\w-]+)[^>]*>", html):
         if closing:
             if not stack or stack.pop() != tag:
                 return False
@@ -33,75 +23,101 @@ def tags_balanced(html: str) -> bool:
     return not stack
 
 
-class FormattingTests(unittest.TestCase):
-    def test_emoji_line(self) -> None:
-        self.assertEqual(emoji_line(1, EmojiInfo("5", "🔥")), "1. 🔥 — <code>5</code>")
-        self.assertEqual(emoji_line(2, EmojiInfo("5")), "2. <code>5</code>")
-
-    def test_html_escaped(self) -> None:
-        evil = EmojiPack(name="Evil", title="<b>x</b> & <script>", emojis=(EmojiInfo("1", "<i>", "Evil"),))
-        text = "\n".join(format_pack_messages(evil))
-        self.assertIn("&lt;b&gt;x&lt;/b&gt; &amp; &lt;script&gt;", text)
-        self.assertIn("&lt;i&gt;", text)
-        self.assertNotIn("<script>", text)
-        self.assertTrue(tags_balanced(text))
-
-    def test_single_summary(self) -> None:
-        p = pack(24, name="MyEmojiPack", title="My Emoji Pack")
-        result = LookupResult(requested=[p.emojis[0]], packs=[p])
-        text = format_summary(result)
-        self.assertIn("Custom Emoji topildi", text)
-        self.assertIn("<code>5368324170671200000</code>", text)
-        self.assertIn("24 ta Custom Emoji", text)
-        self.assertIn("MyEmojiPack", text)
-
-    def test_summary_without_set(self) -> None:
-        item = EmojiInfo("7", "⭐")
-        text = format_summary(LookupResult(requested=[item], orphans=[item]))
-        self.assertIn("aniqlanmadi", text)
-        self.assertIn("set nomini qaytarmadi", text)
-
-    def test_summary_failed_set_warning(self) -> None:
-        item = EmojiInfo("7", "⭐", "Gone")
-        text = format_summary(LookupResult(requested=[item], orphans=[item], failed_sets=["Gone"]))
-        self.assertIn("to'liq pack ma'lumotini bermadi", text)
-        self.assertIn("<code>7</code>", text)
-
-    def test_large_pack_chunked(self) -> None:
-        messages = format_pack_messages(pack(200))
-        self.assertEqual(len(messages), 4)
-        self.assertIn("1–50", messages[0])
-        self.assertIn("51–100", messages[1])
-        self.assertIn("151–200", messages[3])
-        for m in messages:
-            self.assertLessEqual(utf16_len(m), MESSAGE_LIMIT)
-            self.assertTrue(tags_balanced(m))
-        joined = "\n".join(messages)
-        self.assertEqual(len(re.findall(r"<code>\d+</code>", joined)), 200)
-
-    def test_chunk_respects_char_limit(self) -> None:
-        lines = [f"{i}. " + "x" * 300 for i in range(30)]
-        chunks = chunk_lines(lines, lambda s, e: f"H {s}–{e}", max_items=50, limit=1000)
-        self.assertGreater(len(chunks), 1)
-        self.assertEqual(sum(c.count("x" * 300) for c in chunks), 30)
-        for c in chunks:
-            self.assertLessEqual(utf16_len(c), 1000)
-
-    def test_ids_messages(self) -> None:
-        p = pack(200)
-        messages = format_ids_messages(LookupResult(packs=[p]))
-        self.assertEqual(len(messages), 2)
-        for m in messages:
-            self.assertLessEqual(utf16_len(m), MESSAGE_LIMIT)
-            self.assertTrue(tags_balanced(m))
-        body = "".join(re.findall(r"<pre>(.*?)</pre>", "".join(messages), re.S))
-        self.assertEqual(len(re.findall(r"\d{19}", body)), 200)
-
-    def test_copy_payload_limit(self) -> None:
-        self.assertEqual(copy_payload(["1", "2"]), "1\n2")
-        self.assertIsNone(copy_payload([]))
-        self.assertIsNone(copy_payload(["5368324170671202286"] * 20))
+def make_session(n: int, title: str = "Animals Premium", name: str = "animals_by_example", emoji: str | None = "🔥") -> Session:
+    items = tuple(EmojiItem(str(5368324170671200000 + i), emoji, name) for i in range(n))
+    return Session(sid="sid", user_id=1, packs=[EmojiPack(name=name, title=title, items=items)])
 
 
-if __name__ == "__main__":
-    unittest.main()
+views = Views(PremiumEmojiRegistry())
+
+
+def test_premium_emoji_markup_escaped() -> None:
+    assert premium_emoji("123", "<x>") == '<tg-emoji emoji-id="123">&lt;x&gt;</tg-emoji>'
+    assert content_emoji(EmojiItem("1", None)) == ""
+
+
+def test_explorer_message_is_title_sent_line_and_table_only() -> None:
+    session = make_session(105, title="Telegram Emoji's by @trillio", name="emojiuzbek", emoji="✈️")
+    session.sent = [session.packs[0].items[34]]
+    screen = views.explorer(session, 0, get_page(105, 2))
+    lines = screen.html.split("\n")
+    assert lines[0] == "<b>Telegram Emoji's by @trillio</b>"
+    assert lines[1] == '№ 35 <tg-emoji emoji-id="5368324170671200034">✈️</tg-emoji> — <code>5368324170671200034</code>'
+    assert lines[2] == ""
+    assert all(line.startswith("<code>") for line in lines[3:]) and len(lines[3:]) == 5  # 5x5 jadval
+    for unwanted in ("Set:", "emojiuzbek", "ta Custom Emoji", "Sahifa", "Yuborilgan", "Raqamni bosing"):
+        assert unwanted not in screen.html
+    assert tags_balanced(screen.html)
+
+    blocks = screen.rich.blocks
+    assert [b.type for b in blocks] == ["heading", "paragraph", "table"]
+    assert blocks[0].text == ["Telegram Emoji's by @trillio"]
+    number, emoji, dash, code = blocks[1].text
+    assert (number, dash, code.text) == ("№ 35 ", " — ", "5368324170671200034")
+    assert emoji.custom_emoji_id == "5368324170671200034"
+
+
+def test_explorer_without_sent_emoji_is_title_and_table() -> None:
+    screen = views.explorer(make_session(10), 0, get_page(10, 1))
+    assert [b.type for b in screen.rich.blocks] == ["heading", "table"]
+    assert screen.html.split("\n")[1] == ""
+
+
+def test_explorer_html_table_layout() -> None:
+    screen = views.explorer(make_session(25), 0, get_page(25, 1))
+    rows = [line for line in screen.html.splitlines() if line.startswith("<code>")]
+    assert len(rows) == 5 and all(r.count("<code>") == 5 for r in rows)
+    assert rows[0].startswith("<code> 1</code>") and "<code> 5</code>" in rows[0]
+    assert rows[-1].startswith("<code>21</code>") and "<code>25</code>" in rows[-1]
+
+
+def test_html_escaping_everywhere() -> None:
+    session = make_session(3, title=EVIL, name="Evil", emoji="<i>")
+    screens = [
+        views.explorer(session, 0, get_page(3, 1)),
+        views.detail(session, 0, 1, 1),
+        views.code(session, 0, 1, 1, CodeGeneratorService().generate(CodeLanguage.PHP, "1")),
+    ]
+    for screen in screens:
+        assert "<script>" not in screen.html and "<b>x</b>" not in screen.html
+        assert tags_balanced(screen.html), screen.html
+    assert "&lt;?php" in screens[2].html
+    rich = screens[0].rich
+    assert rich.blocks[0].text[-1] == EVIL  # rich bloklar strukturali — HTML parse qilinmaydi
+
+
+def test_detail_contents() -> None:
+    html = views.detail(make_session(5), 0, 2, 1).html
+    assert "<b>№ 2</b> / 5" in html
+    assert "<code>5368324170671200001</code>" in html
+    assert '<tg-emoji emoji-id="5368324170671200001">🔥</tg-emoji>' in html
+    assert "https://t.me/addemoji/animals_by_example" in html
+
+
+def test_virtual_pack_has_no_set_link() -> None:
+    session = make_session(2)
+    session.packs[0] = EmojiPack(name="", title="Yuborilgan emoji'lar", items=session.packs[0].items, is_virtual=True)
+    html = views.detail(session, 0, 1, 1).html
+    assert "addemoji" not in html and "Set:" not in html
+
+
+def test_message_limits_worst_case() -> None:
+    session = make_session(200, title="T" * 64, name="N" * 64)
+    gen = CodeGeneratorService()
+    screens = [views.explorer(session, 0, get_page(200, p)) for p in (1, 8)]
+    screens.append(views.detail(session, 0, 200, 8))
+    screens += [views.code(session, 0, 200, 8, gen.generate(lang, "5368324170671200199")) for lang in CodeLanguage]
+    for screen in screens:
+        assert utf16_len(screen.html) < MESSAGE_TEXT_MAX_CHARS
+        total_buttons = sum(len(r) for r in screen.keyboard.inline_keyboard)
+        assert total_buttons <= 100
+
+
+def test_sent_emoji_other_pack_not_shown_and_many_truncated() -> None:
+    session = make_session(40)
+    session.sent = [EmojiItem("999", "x", "other")]
+    assert "№" not in views.explorer(session, 0, get_page(40, 1)).html
+    session.sent = list(session.packs[0].items[:15])
+    html = views.explorer(session, 0, get_page(40, 1)).html
+    assert html.count("№ ") == 10 and "yana 5 ta" in html
+    assert utf16_len(html) < MESSAGE_TEXT_MAX_CHARS

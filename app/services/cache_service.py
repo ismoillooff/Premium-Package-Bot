@@ -1,4 +1,4 @@
-"""Oddiy in-memory TTL kesh (tashqi dependency'siz)."""
+"""Oddiy in-memory TTL kesh (tashqi dependency'siz). Hajmi cheklangan — memory leak bo'lmaydi."""
 
 from __future__ import annotations
 
@@ -46,3 +46,6 @@ class TTLCache(Generic[K, V]):
 
     def __len__(self) -> int:
         return len(self._data)
+
+    def delete(self, key: K) -> None:
+        self._data.pop(key, None)
